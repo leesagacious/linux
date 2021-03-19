@@ -393,6 +393,11 @@
 #define SNR_M2M_PCI_PMON_BOX_CTL		0x438
 #define SNR_M2M_PCI_PMON_UMASK_EXT		0xff
 
+/* SNR PCIE3 */
+#define SNR_PCIE3_PCI_PMON_CTL0			0x508
+#define SNR_PCIE3_PCI_PMON_CTR0			0x4e8
+#define SNR_PCIE3_PCI_PMON_BOX_CTL		0x4e0
+
 /* SNR IMC */
 #define SNR_IMC_MMIO_PMON_FIXED_CTL		0x54
 #define SNR_IMC_MMIO_PMON_FIXED_CTR		0x38
@@ -1354,7 +1359,7 @@ static struct pci_driver snbep_uncore_pci_driver = {
 static int snbep_pci2phy_map_init(int devid, int nodeid_loc, int idmap_loc, bool reverse)
 {
 	struct pci_dev *ubox_dev = NULL;
-	int i, bus, nodeid, segment;
+	int i, bus, nodeid, segment, die_id;
 	struct pci2phy_map *map;
 	int err = 0;
 	u32 config = 0;
@@ -1365,36 +1370,77 @@ static int snbep_pci2phy_map_init(int devid, int nodeid_loc, int idmap_loc, bool
 		if (!ubox_dev)
 			break;
 		bus = ubox_dev->bus->number;
-		/* get the Node ID of the local register */
-		err = pci_read_config_dword(ubox_dev, nodeid_loc, &config);
-		if (err)
-			break;
-		nodeid = config & NODE_ID_MASK;
-		/* get the Node ID mapping */
-		err = pci_read_config_dword(ubox_dev, idmap_loc, &config);
-		if (err)
-			break;
-
-		segment = pci_domain_nr(ubox_dev->bus);
-		raw_spin_lock(&pci2phy_map_lock);
-		map = __find_pci2phy_map(segment);
-		if (!map) {
-			raw_spin_unlock(&pci2phy_map_lock);
-			err = -ENOMEM;
-			break;
-		}
-
 		/*
-		 * every three bits in the Node ID mapping register maps
-		 * to a particular node.
+		 * The nodeid and idmap registers only contain enough
+		 * information to handle 8 nodes.  On systems with more
+		 * than 8 nodes, we need to rely on NUMA information,
+		 * filled in from BIOS supplied information, to determine
+		 * the topology.
 		 */
-		for (i = 0; i < 8; i++) {
-			if (nodeid == ((config >> (3 * i)) & 0x7)) {
-				map->pbus_to_physid[bus] = i;
+		if (nr_node_ids <= 8) {
+			/* get the Node ID of the local register */
+			err = pci_read_config_dword(ubox_dev, nodeid_loc, &config);
+			if (err)
+				break;
+			nodeid = config & NODE_ID_MASK;
+			/* get the Node ID mapping */
+			err = pci_read_config_dword(ubox_dev, idmap_loc, &config);
+			if (err)
+				break;
+
+			segment = pci_domain_nr(ubox_dev->bus);
+			raw_spin_lock(&pci2phy_map_lock);
+			map = __find_pci2phy_map(segment);
+			if (!map) {
+				raw_spin_unlock(&pci2phy_map_lock);
+				err = -ENOMEM;
+				break;
+			}
+
+			/*
+			 * every three bits in the Node ID mapping register maps
+			 * to a particular node.
+			 */
+			for (i = 0; i < 8; i++) {
+				if (nodeid == ((config >> (3 * i)) & 0x7)) {
+					if (topology_max_die_per_package() > 1)
+						die_id = i;
+					else
+						die_id = topology_phys_to_logical_pkg(i);
+					map->pbus_to_dieid[bus] = die_id;
+					break;
+				}
+			}
+			raw_spin_unlock(&pci2phy_map_lock);
+		} else {
+			int node = pcibus_to_node(ubox_dev->bus);
+			int cpu;
+
+			segment = pci_domain_nr(ubox_dev->bus);
+			raw_spin_lock(&pci2phy_map_lock);
+			map = __find_pci2phy_map(segment);
+			if (!map) {
+				raw_spin_unlock(&pci2phy_map_lock);
+				err = -ENOMEM;
+				break;
+			}
+
+			die_id = -1;
+			for_each_cpu(cpu, cpumask_of_pcibus(ubox_dev->bus)) {
+				struct cpuinfo_x86 *c = &cpu_data(cpu);
+
+				if (c->initialized && cpu_to_node(cpu) == node) {
+					map->pbus_to_dieid[bus] = die_id = c->logical_die_id;
+					break;
+				}
+			}
+			raw_spin_unlock(&pci2phy_map_lock);
+
+			if (WARN_ON_ONCE(die_id == -1)) {
+				err = -EINVAL;
 				break;
 			}
 		}
-		raw_spin_unlock(&pci2phy_map_lock);
 	}
 
 	if (!err) {
@@ -1407,17 +1453,17 @@ static int snbep_pci2phy_map_init(int devid, int nodeid_loc, int idmap_loc, bool
 			i = -1;
 			if (reverse) {
 				for (bus = 255; bus >= 0; bus--) {
-					if (map->pbus_to_physid[bus] >= 0)
-						i = map->pbus_to_physid[bus];
+					if (map->pbus_to_dieid[bus] >= 0)
+						i = map->pbus_to_dieid[bus];
 					else
-						map->pbus_to_physid[bus] = i;
+						map->pbus_to_dieid[bus] = i;
 				}
 			} else {
 				for (bus = 0; bus <= 255; bus++) {
-					if (map->pbus_to_physid[bus] >= 0)
-						i = map->pbus_to_physid[bus];
+					if (map->pbus_to_dieid[bus] >= 0)
+						i = map->pbus_to_dieid[bus];
 					else
-						map->pbus_to_physid[bus] = i;
+						map->pbus_to_dieid[bus] = i;
 				}
 			}
 		}
@@ -3749,7 +3795,9 @@ static int skx_iio_set_mapping(struct intel_uncore_type *type)
 
 	ret = skx_iio_get_topology(type);
 	if (ret)
-		return ret;
+		goto clear_attr_update;
+
+	ret = -ENOMEM;
 
 	/* One more for NULL. */
 	attrs = kcalloc((uncore_max_dies() + 1), sizeof(*attrs), GFP_KERNEL);
@@ -3781,8 +3829,9 @@ err:
 	kfree(eas);
 	kfree(attrs);
 	kfree(type->topology);
+clear_attr_update:
 	type->attr_update = NULL;
-	return -ENOMEM;
+	return ret;
 }
 
 static void skx_iio_cleanup_mapping(struct intel_uncore_type *type)
@@ -4551,12 +4600,46 @@ static struct intel_uncore_type snr_uncore_m2m = {
 	.format_group	= &snr_m2m_uncore_format_group,
 };
 
+static void snr_uncore_pci_enable_event(struct intel_uncore_box *box, struct perf_event *event)
+{
+	struct pci_dev *pdev = box->pci_dev;
+	struct hw_perf_event *hwc = &event->hw;
+
+	pci_write_config_dword(pdev, hwc->config_base, (u32)(hwc->config | SNBEP_PMON_CTL_EN));
+	pci_write_config_dword(pdev, hwc->config_base + 4, (u32)(hwc->config >> 32));
+}
+
+static struct intel_uncore_ops snr_pcie3_uncore_pci_ops = {
+	.init_box	= snr_m2m_uncore_pci_init_box,
+	.disable_box	= snbep_uncore_pci_disable_box,
+	.enable_box	= snbep_uncore_pci_enable_box,
+	.disable_event	= snbep_uncore_pci_disable_event,
+	.enable_event	= snr_uncore_pci_enable_event,
+	.read_counter	= snbep_uncore_pci_read_counter,
+};
+
+static struct intel_uncore_type snr_uncore_pcie3 = {
+	.name		= "pcie3",
+	.num_counters	= 4,
+	.num_boxes	= 1,
+	.perf_ctr_bits	= 48,
+	.perf_ctr	= SNR_PCIE3_PCI_PMON_CTR0,
+	.event_ctl	= SNR_PCIE3_PCI_PMON_CTL0,
+	.event_mask	= SKX_IIO_PMON_RAW_EVENT_MASK,
+	.event_mask_ext	= SKX_IIO_PMON_RAW_EVENT_MASK_EXT,
+	.box_ctl	= SNR_PCIE3_PCI_PMON_BOX_CTL,
+	.ops		= &snr_pcie3_uncore_pci_ops,
+	.format_group	= &skx_uncore_iio_format_group,
+};
+
 enum {
 	SNR_PCI_UNCORE_M2M,
+	SNR_PCI_UNCORE_PCIE3,
 };
 
 static struct intel_uncore_type *snr_pci_uncores[] = {
 	[SNR_PCI_UNCORE_M2M]		= &snr_uncore_m2m,
+	[SNR_PCI_UNCORE_PCIE3]		= &snr_uncore_pcie3,
 	NULL,
 };
 
@@ -4573,6 +4656,19 @@ static struct pci_driver snr_uncore_pci_driver = {
 	.id_table	= snr_uncore_pci_ids,
 };
 
+static const struct pci_device_id snr_uncore_pci_sub_ids[] = {
+	{ /* PCIe3 RP */
+		PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0x334a),
+		.driver_data = UNCORE_PCI_DEV_FULL_DATA(4, 0, SNR_PCI_UNCORE_PCIE3, 0),
+	},
+	{ /* end: all zeroes */ }
+};
+
+static struct pci_driver snr_uncore_pci_sub_driver = {
+	.name		= "snr_uncore_sub",
+	.id_table	= snr_uncore_pci_sub_ids,
+};
+
 int snr_uncore_pci_init(void)
 {
 	/* SNR UBOX DID */
@@ -4584,25 +4680,21 @@ int snr_uncore_pci_init(void)
 
 	uncore_pci_uncores = snr_pci_uncores;
 	uncore_pci_driver = &snr_uncore_pci_driver;
+	uncore_pci_sub_driver = &snr_uncore_pci_sub_driver;
 	return 0;
 }
 
 static struct pci_dev *snr_uncore_get_mc_dev(int id)
 {
 	struct pci_dev *mc_dev = NULL;
-	int phys_id, pkg;
+	int pkg;
 
 	while (1) {
 		mc_dev = pci_get_device(PCI_VENDOR_ID_INTEL, 0x3451, mc_dev);
 		if (!mc_dev)
 			break;
-		phys_id = uncore_pcibus_to_physid(mc_dev->bus);
-		if (phys_id < 0)
-			continue;
-		pkg = topology_phys_to_logical_pkg(phys_id);
-		if (pkg < 0)
-			continue;
-		else if (pkg == id)
+		pkg = uncore_pcibus_to_dieid(mc_dev->bus);
+		if (pkg == id)
 			break;
 	}
 	return mc_dev;
@@ -4751,10 +4843,10 @@ static struct uncore_event_desc snr_uncore_imc_freerunning_events[] = {
 	INTEL_UNCORE_EVENT_DESC(dclk,		"event=0xff,umask=0x10"),
 
 	INTEL_UNCORE_EVENT_DESC(read,		"event=0xff,umask=0x20"),
-	INTEL_UNCORE_EVENT_DESC(read.scale,	"3.814697266e-6"),
+	INTEL_UNCORE_EVENT_DESC(read.scale,	"6.103515625e-5"),
 	INTEL_UNCORE_EVENT_DESC(read.unit,	"MiB"),
 	INTEL_UNCORE_EVENT_DESC(write,		"event=0xff,umask=0x21"),
-	INTEL_UNCORE_EVENT_DESC(write.scale,	"3.814697266e-6"),
+	INTEL_UNCORE_EVENT_DESC(write.scale,	"6.103515625e-5"),
 	INTEL_UNCORE_EVENT_DESC(write.unit,	"MiB"),
 	{ /* end: all zeroes */ },
 };
@@ -5212,17 +5304,17 @@ static struct uncore_event_desc icx_uncore_imc_freerunning_events[] = {
 	INTEL_UNCORE_EVENT_DESC(dclk,			"event=0xff,umask=0x10"),
 
 	INTEL_UNCORE_EVENT_DESC(read,			"event=0xff,umask=0x20"),
-	INTEL_UNCORE_EVENT_DESC(read.scale,		"3.814697266e-6"),
+	INTEL_UNCORE_EVENT_DESC(read.scale,		"6.103515625e-5"),
 	INTEL_UNCORE_EVENT_DESC(read.unit,		"MiB"),
 	INTEL_UNCORE_EVENT_DESC(write,			"event=0xff,umask=0x21"),
-	INTEL_UNCORE_EVENT_DESC(write.scale,		"3.814697266e-6"),
+	INTEL_UNCORE_EVENT_DESC(write.scale,		"6.103515625e-5"),
 	INTEL_UNCORE_EVENT_DESC(write.unit,		"MiB"),
 
 	INTEL_UNCORE_EVENT_DESC(ddrt_read,		"event=0xff,umask=0x30"),
-	INTEL_UNCORE_EVENT_DESC(ddrt_read.scale,	"3.814697266e-6"),
+	INTEL_UNCORE_EVENT_DESC(ddrt_read.scale,	"6.103515625e-5"),
 	INTEL_UNCORE_EVENT_DESC(ddrt_read.unit,		"MiB"),
 	INTEL_UNCORE_EVENT_DESC(ddrt_write,		"event=0xff,umask=0x31"),
-	INTEL_UNCORE_EVENT_DESC(ddrt_write.scale,	"3.814697266e-6"),
+	INTEL_UNCORE_EVENT_DESC(ddrt_write.scale,	"6.103515625e-5"),
 	INTEL_UNCORE_EVENT_DESC(ddrt_write.unit,	"MiB"),
 	{ /* end: all zeroes */ },
 };

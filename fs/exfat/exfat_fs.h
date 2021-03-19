@@ -128,7 +128,7 @@ enum {
 
 struct exfat_dentry_namebuf {
 	char *lfn;
-	int lfnbuf_len; /* usally MAX_UNINAME_BUF_SIZE */
+	int lfnbuf_len; /* usually MAX_UNINAME_BUF_SIZE */
 };
 
 /* unicode name structure */
@@ -248,6 +248,8 @@ struct exfat_sb_info {
 	struct rcu_head rcu;
 };
 
+#define EXFAT_CACHE_VALID	0
+
 /*
  * EXFAT file system inode in-memory data
  */
@@ -263,8 +265,6 @@ struct exfat_inode_info {
 	 * the validation of hint_stat.
 	 */
 	unsigned int version;
-	/* file offset or dentry index for readdir */
-	loff_t rwoffset;
 
 	/* hint for cluster last accessed */
 	struct exfat_hint hint_bmap;
@@ -408,7 +408,7 @@ int exfat_count_num_clusters(struct super_block *sb,
 int exfat_load_bitmap(struct super_block *sb);
 void exfat_free_bitmap(struct exfat_sb_info *sbi);
 int exfat_set_bitmap(struct inode *inode, unsigned int clu);
-void exfat_clear_bitmap(struct inode *inode, unsigned int clu);
+void exfat_clear_bitmap(struct inode *inode, unsigned int clu, bool sync);
 unsigned int exfat_find_free_bitmap(struct super_block *sb, unsigned int clu);
 int exfat_count_used_clusters(struct super_block *sb, unsigned int *ret_count);
 
@@ -416,9 +416,11 @@ int exfat_count_used_clusters(struct super_block *sb, unsigned int *ret_count);
 extern const struct file_operations exfat_file_operations;
 int __exfat_truncate(struct inode *inode, loff_t new_size);
 void exfat_truncate(struct inode *inode, loff_t size);
-int exfat_setattr(struct dentry *dentry, struct iattr *attr);
-int exfat_getattr(const struct path *path, struct kstat *stat,
-		unsigned int request_mask, unsigned int query_flags);
+int exfat_setattr(struct user_namespace *mnt_userns, struct dentry *dentry,
+		  struct iattr *attr);
+int exfat_getattr(struct user_namespace *mnt_userns, const struct path *path,
+		  struct kstat *stat, unsigned int request_mask,
+		  unsigned int query_flags);
 int exfat_file_fsync(struct file *file, loff_t start, loff_t end, int datasync);
 
 /* namei.c */
@@ -428,7 +430,6 @@ extern const struct dentry_operations exfat_utf8_dentry_ops;
 /* cache.c */
 int exfat_cache_init(void);
 void exfat_cache_shutdown(void);
-void exfat_cache_init_inode(struct inode *inode);
 void exfat_cache_inval_inode(struct inode *inode);
 int exfat_get_cluster(struct inode *inode, unsigned int cluster,
 		unsigned int *fclus, unsigned int *dclus,

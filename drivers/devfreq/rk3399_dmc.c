@@ -341,7 +341,7 @@ static int rk3399_dmcfreq_probe(struct platform_device *pdev)
 		return PTR_ERR(data->dmc_clk);
 	}
 
-	data->edev = devfreq_event_get_edev_by_phandle(dev, 0);
+	data->edev = devfreq_event_get_edev_by_phandle(dev, "devfreq-events", 0);
 	if (IS_ERR(data->edev))
 		return -EPROBE_DEFER;
 
@@ -400,7 +400,7 @@ static int rk3399_dmcfreq_probe(struct platform_device *pdev)
 	default:
 		ret = -EINVAL;
 		goto err_edev;
-	};
+	}
 
 no_pmu:
 	arm_smccc_smc(ROCKCHIP_SIP_DRAM_FREQ, 0, 0,

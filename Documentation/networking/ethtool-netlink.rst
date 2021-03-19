@@ -68,6 +68,7 @@ the flags may not apply to requests. Recognized flags are:
   =================================  ===================================
   ``ETHTOOL_FLAG_COMPACT_BITSETS``   use compact format bitsets in reply
   ``ETHTOOL_FLAG_OMIT_REPLY``        omit optional reply (_SET and _ACT)
+  ``ETHTOOL_FLAG_STATS``             include optional device statistics
   =================================  ===================================
 
 New request flags should follow the general idea that if the flag is not set,
@@ -206,6 +207,7 @@ Userspace to kernel:
   ``ETHTOOL_MSG_TSINFO_GET``		get timestamping info
   ``ETHTOOL_MSG_CABLE_TEST_ACT``        action start cable test
   ``ETHTOOL_MSG_CABLE_TEST_TDR_ACT``    action start raw TDR cable test
+  ``ETHTOOL_MSG_TUNNEL_INFO_GET``       get tunnel offload info
   ===================================== ================================
 
 Kernel to userspace:
@@ -239,6 +241,7 @@ Kernel to userspace:
   ``ETHTOOL_MSG_TSINFO_GET_REPLY``	timestamping info
   ``ETHTOOL_MSG_CABLE_TEST_NTF``        Cable test results
   ``ETHTOOL_MSG_CABLE_TEST_TDR_NTF``    Cable test TDR results
+  ``ETHTOOL_MSG_TUNNEL_INFO_GET_REPLY`` tunnel offload info
   ===================================== =================================
 
 ``GET`` requests are sent by userspace applications to retrieve device
@@ -428,16 +431,17 @@ Request contents:
   ``ETHTOOL_A_LINKMODES_SPEED``               u32     link speed (Mb/s)
   ``ETHTOOL_A_LINKMODES_DUPLEX``              u8      duplex mode
   ``ETHTOOL_A_LINKMODES_MASTER_SLAVE_CFG``    u8      Master/slave port mode
+  ``ETHTOOL_A_LINKMODES_LANES``               u32     lanes
   ==========================================  ======  ==========================
 
 ``ETHTOOL_A_LINKMODES_OURS`` bit set allows setting advertised link modes. If
 autonegotiation is on (either set now or kept from before), advertised modes
 are not changed (no ``ETHTOOL_A_LINKMODES_OURS`` attribute) and at least one
-of speed and duplex is specified, kernel adjusts advertised modes to all
-supported modes matching speed, duplex or both (whatever is specified). This
-autoselection is done on ethtool side with ioctl interface, netlink interface
-is supposed to allow requesting changes without knowing what exactly kernel
-supports.
+of speed, duplex and lanes is specified, kernel adjusts advertised modes to all
+supported modes matching speed, duplex, lanes or all (whatever is specified).
+This autoselection is done on ethtool side with ioctl interface, netlink
+interface is supposed to allow requesting changes without knowing what exactly
+kernel supports.
 
 
 LINKSTATE_GET
@@ -989,8 +993,18 @@ Kernel response contents:
   ``ETHTOOL_A_PAUSE_AUTONEG``            bool    pause autonegotiation
   ``ETHTOOL_A_PAUSE_RX``                 bool    receive pause frames
   ``ETHTOOL_A_PAUSE_TX``                 bool    transmit pause frames
+  ``ETHTOOL_A_PAUSE_STATS``              nested  pause statistics
   =====================================  ======  ==========================
 
+``ETHTOOL_A_PAUSE_STATS`` are reported if ``ETHTOOL_FLAG_STATS`` was set
+in ``ETHTOOL_A_HEADER_FLAGS``.
+It will be empty if driver did not report any statistics. Drivers fill in
+the statistics in the following structure:
+
+.. kernel-doc:: include/linux/ethtool.h
+    :identifiers: ethtool_pause_stats
+
+Each member has a corresponding attribute defined.
 
 PAUSE_SET
 ============
@@ -1363,4 +1377,5 @@ are netlink only.
   ``ETHTOOL_SFECPARAM``               n/a
   n/a                                 ''ETHTOOL_MSG_CABLE_TEST_ACT''
   n/a                                 ''ETHTOOL_MSG_CABLE_TEST_TDR_ACT''
+  n/a                                 ``ETHTOOL_MSG_TUNNEL_INFO_GET``
   =================================== =====================================
